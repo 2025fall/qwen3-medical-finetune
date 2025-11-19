@@ -1,75 +1,77 @@
 # RL 微调阶段可行性分析与方案
 
 ## 1. 项目背景概述
-- **数据准备**：`scripts/prepare_data.py` 已实现医疗问答数据的下载、清洗、去重与分层切分，并构建 gold 集、红队集和数据卡，保证敏感场景覆盖与合规记录。
-- **监督微调**：`scripts/train_lora.py`、`scripts/train_full.py` 支持 LoRA 与全参数两套流程，当前策略模型能够输出结构化推理链并覆盖常见临床场景。
-- **评估体系**：`scripts/eval_auto.py` 提供思考链覆盖率、紧急指征覆盖率、风险处方率等核心指标；`scripts/batch_predict.py` 和 `scripts/demo_gradio.py` 支持批量及交互式推理，为后续 RL 环节提供回归基线。
-- **工程依赖**：现有环境基于 transformers/peft/datasets，尚未引入专门的强化学习或偏好建模库，但模块化程度高，便于扩展。
+- **数据准备**：`scripts/prepare_data.py` 已完成下载、清洗、去重与分层切分，并在 `build_gold_and_red()` 中生成 `data/processed/gold_set.jsonl` 和 `data/processed/red_team.jsonl`，同时更新 `DATA_CARD.md`。后续将通过 `scripts/deepseek_teacher.py` 让 DeepSeek 教师定期抽检 gold/red，形成“生成 → 教师复核”的闭环。
+- **监督微调能力**：`scripts/train_lora.py`、`scripts/train_full.py` 已交付 LoRA 与全参数两套流程，可输出显式 `<think>` 推理链，权重落地在 `models/lora/`、`models/full/`，可直接用作 RL 策略与 reference。
+- **评估与推理工具**：`scripts/eval_auto.py` 默认评估 `dev/test/gold_set/red_team` 四个 split；`scripts/batch_predict.py` 与 `scripts/demo_gradio.py` 支持批量及交互式推理，可在引入 RL 后对比 SFT 与 RL 版本。
+- **工程依赖**：目前基于 `transformers`、`peft`、`datasets`，尚未引入 `trl`。脚本模块化程度高，便于添加 DeepSeek 教师、奖励函数与 PPO 训练脚本。
 
-## 2. 强化学习方案选择与理由
+## 2. 强化学习方案选择
 ### 2.1 候选方案评估
-- **PPO + 手工奖励模型**：需要训练独立 reward model，人工标注和训练成本高，部署复杂度大。
-- **DPO/KTO**：利用偏好对直接对比学习，流程轻量，但难以整合多维安全指标，且仍需一定量人工偏好标注。
-- **规则增强的 RLAIF-PPO（推荐）**：以现有自动评估指标和少量 LLM 辅助评分构成奖励，无需大规模人工标注，可直接复用 SFT 模型与 LoRA 流程，训练成本可控。
+- **PPO + 手工奖励模型**：需重新训练 reward model、采集偏好标注，成本高且难以覆盖医疗安全指标。
+- **DPO/KTO**：对比学习流程轻量，但无法直接利用 DeepSeek 教师，也难以将多维安全指标融入统一损失。
+- **DeepSeek 教师 + 规则增强 RLAIF-PPO（推荐）**：DeepSeek-R1/DeepSeek-V3 负责偏好判断，现有自动化指标提供硬约束，整体复用 LoRA-SFT 流程，成本与安全性可控。
 
-### 2.2 推荐方案：规则增强的 RLAIF-PPO
-- **低人工成本**：以现有自动化指标为主、结合少量专家抽检，避免大量人工配对标注。
-- **训练资源友好**：继续使用 LoRA 适配器，仅新增 value head 与 `trl` 框架，单卡 24GB GPU 即可完成 PPO 训练。
-- **安全指标可定制**：奖励函数可加权组合思考链完整度、紧急指征覆盖率、风险处方惩罚等，满足医疗安全需求。
-- **与现有体系兼容**：SFT 策略模型直接作为 PPO 初始模型，评估脚本复用于训练监控与回归测试。
+### 2.2 推荐方案：DeepSeek 教师辅助的 RLAIF-PPO
+- 教师模型可评审思考链质量、医学严谨性、沟通礼仪等软指标，弥补纯规则的盲区。
+- 通过 DeepSeek 给出初判，仅在有争议样本上做医学顾问抽检，可显著降低人工配对成本。
+- 继续使用 LoRA，仅新增 value head 与 `trl`，单张 24GB GPU 即可完成 PPO 训练。
+- 奖励函数可配置组合 `teacher_score`、思考链覆盖度、紧急指征覆盖率及风险处方惩罚，确保安全底线。
+- 教师脚本解耦在独立模块内，不影响现有推理与评估，SFT 模型直接作为策略与参考模型。
 
-## 3. 可行性分析（聚焦 RLAIF-PPO）
+## 3. 可行性分析（DeepSeek 教师 RLAIF-PPO）
 ### 3.1 数据与奖励构建
-- **可复用数据资产**：gold/红队样本覆盖急诊、用药、滥用等高风险场景，可直接作为 PPO 采样提示集，确保训练期间不断触达安全重点。
-- **奖励信号体系**：基于 `scripts/eval_auto.py` 的三项指标（思考链覆盖率、紧急指征覆盖率、风险处方率）做归一化处理，奖励公式示例：`R = 0.4 * chain_score + 0.4 * emergency_score - 0.2 * risk_penalty`，实现方式为纯规则函数，无需额外模型。
-- **低成本人工校验**：针对规则无法覆盖的沟通礼仪或复杂病例，按 10% 抽样调用通用大模型生成初审标签，再由医学顾问做 spot check，每周累计人工审阅量控制在 40-60 条。
-- **数据管理**：新增 `data/rl/training_prompts.jsonl`（提示集合）与 `data/rl/reward_rules.md`（奖励说明），留存来源、版本与质量记录，满足治理需求。
+- `gold_set.jsonl` 与 `red_team.jsonl` 覆盖急症、用药、敏感人群，可直接作为 PPO 采样提示。借助 `scripts/deepseek_teacher.py` 定期对 gold/red 样本执行 DeepSeek 复核，如识别到风险缺口则根据教师建议增补红队或调整抽样权重。
+- 统一 DeepSeek 教师提示模板，输出 `teacher_score`（0-1）、`safety_flag` 与点评，再与 `scripts/eval_auto.py` 的规则分归一化组合，示例公式 `R = 0.35*chain_score + 0.25*emergency_score - 0.15*risk_penalty + 0.25*teacher_score`。对金标样例保留教师“最佳回答”片段供 RL 提示参考。
+- 当教师分与规则分差异较大时写入 `data/rl/teacher_conflicts.jsonl` 并保存 DeepSeek 建议；每周抽检 40-60 条由医学顾问复核，实现“教师 → 专家”双通道反馈。
+- 新增 `data/rl/training_prompts.jsonl`（RL 采样提示）、`data/rl/teacher_judgements.jsonl`（教师缓存）、`data/rl/reward_rules.md`（奖励配置），确保提示、版本、审计信息可追溯。
 
 ### 3.2 模型与工程实现
-- **策略初始化**：使用 LoRA 版 SFT 模型，调用 `AutoModelForCausalLMWithValueHead.from_pretrained` 创建策略与 value head；LoRA 权重加载后仅新增 <5% 可训练参数。
-- **参考策略**：冻结一份 SFT 模型作为 `ref_model`，通过 `target_kl` 与自适应 KL 回调限制策略漂移，确保安全回归基线不退化。
-- **训练脚本**：在 `scripts/train_ppo.py` 中集成 `trl.PPOTrainer`，复用 `datasets` 迭代器加载提示，奖励函数直接调用包装后的 `reward_fn`，同时记录奖励分布、KL 曲线和失败样本。
-- **评估与部署接口**：扩展 `scripts/eval_auto.py` 接口以接收 RL 模型权重；在 `scripts/demo_gradio.py` 中添加模型下拉框，方便比较 SFT 与 RL 版本。
+- 使用 `AutoModelForCausalLMWithValueHead.from_pretrained` 加载 LoRA SFT 模型并挂载 value head，可训练参数 <5%。
+- 冻结一份 SFT 模型作为 `ref_model`，通过 `target_kl` 控制策略漂移，保持安全回归基线。
+- 新增 `scripts/deepseek_teacher.py`（DeepSeek 批量/异步调用、鉴权、缓存）、`scripts/train_ppo.py`（封装 `trl.PPOTrainer`、提示加载、奖励计算、日志）、`scripts/reward_fn.py`（规则 + 教师得分融合）。
+- 扩展 `scripts/eval_auto.py` 支持加载 RL 权重，在 `scripts/batch_predict.py` 与 `scripts/demo_gradio.py` 中添加模型版本下拉与安全提示，方便产品侧比对 SFT/RL。
 
 ### 3.3 资源与成本评估
-- **GPU 需求**：单卡 24GB（A5000/4090）即可；若显存紧张，启用 gradient checkpointing 和微批处理即可降至 16GB 卡，但训练时间延长约 25%。
-- **训练时间**：每轮采样 2k 提示、运行 3 个 epoch 约耗时 4-6 小时；若一周进行两轮迭代，总 GPU 时长约 10 小时，折算云资源费用约 500-600 元。
-- **存储与日志**：奖励缓存、采样结果、LoRA 适配器与 value head 共计 <5 GB，集中存放在 `models/rl/` 与 `runs/ppo/` 目录即可。
-- **人力投入**：工程侧 1 名开发（约 0.8 FTE）负责脚本、训练与评估自动化；医学顾问 0.3 FTE 负责奖励权重评审与高风险样本审校；整体远低于全量 RLHF 标注成本。
+- **GPU**：单张 24GB (A5000/4090) 即可完成 2k 提示 × 3 epoch 的 PPO；若显存紧张，可启用 gradient checkpointing + micro-batch 在 16GB 设备上运行（时间增加约 25%）。
+- **时间**：单轮“采样→教师打分→PPO 更新”约 4-6 小时；每周两轮训练，对单卡负载 <10 小时。
+- **DeepSeek API 成本**：按 3k tokens/样本、0.002-0.004 USD/1k tokens 估算，2k 样本花费 <25 USD，通过缓存与只对高价值样本全量调用可进一步降低成本。
+- **存储**：LoRA+value head+奖励缓存 <5GB；新增 `logs/deepseek_teacher/` 保存请求、版本、失败重试，满足审计。
+- **人力**：工程 0.8 FTE 负责脚本与训练自动化；医学顾问 0.3 FTE 负责冲突样本审校；数据治理 0.2 FTE 维护提示模板与缓存合规。
 
-### 3.4 依赖与交付可控性
-- **代码依赖**：新增 `trl`、`accelerate`、`rich`（可选日志美化），其余沿用现有 transformers/peft 版本；无需引入复杂分布式框架。
-- **交付形式**：输出 LoRA 适配器 + value head + `config.json`，并保留训练日志、奖励配置；既可独立部署，也可作为下一轮数据迭代基线。
-- **持续演进**：奖励函数采用配置化设计，可在不改动训练主流程的前提下随业务需求调整权重或阈值。
+### 3.4 依赖与交付
+- 新增 `trl`、`accelerate`、`rich` 以及 DeepSeek 官方 SDK/HTTP 客户端，其余沿用 `transformers`、`peft`、`datasets`。
+- 交付物包含 LoRA 适配器、value head、`config.json`、`reward_rules.md`、`teacher_judgements.jsonl`、训练/评估日志，可直接部署或继续迭代。
+- 奖励权重、DeepSeek 提示与版本号均配置化，便于在不修改主训练流程的情况下快速调参或替换教师模型。
 
 ## 4. 实施方案
 ### 阶段 A：奖励与数据准备（第 1 周）
-1. 整理 RL 训练提示：基于现有分层策略抽样，保障高风险样本覆盖率 ≥40%，并生成 `training_prompts.jsonl`。
-2. 实现 `reward_fn`：封装自动指标得分，输出奖励值与解释性日志（命中规则、扣分原因），便于后续审计。
-3. 设计抽检机制：编写 `scripts/inspect_rl_samples.py`，每轮 PPO 完成后自动抽样 50 条，生成需要人工确认的报告。
-4. 输出奖励说明：在 `reward_rules.md` 中记录指标定义、取值范围、加权系数与调整策略，作为方案评审材料。
+1. 基于分层策略抽样生成 `data/rl/training_prompts.jsonl`，确保 ≥40% 红队/高风险提示，并调用 DeepSeek 对代表性样本给出点评。
+2. 开发 `scripts/deepseek_teacher.py`，实现鉴权、提示模板、指数退避重试、缓存写入 `data/rl/teacher_judgements.jsonl`，并支持“数据质检模式”复核 gold/red。
+3. 封装 `reward_fn_rules` 与 `reward_fn_teacher`（可独立存放在 `scripts/reward_fn.py`），奖励日志中保留 DeepSeek 判词，便于追溯。
+4. 编写 `scripts/inspect_rl_samples.py`，整合模型输出、规则分、教师分、异常标记生成 Markdown/CSV 报告，支持回放教师建议回答。
+5. 撰写 `data/rl/reward_rules.md`，记录指标定义、权重区间、DeepSeek 提示模板与版本管理策略，区分质检模式与训练模式。
 
 ### 阶段 B：PPO 训练（第 2 周）
-1. 开发 `train_ppo.py`：集成策略模型、参考模型、奖励函数与日志记录，支持命令行参数调整 batch、KL、学习率等超参。
-2. 完成首轮训练：采样 → 计算奖励 → PPO 更新 → 保存中间权重；训练过程记录 `rewards.csv`、`kl_metrics.json` 等曲线数据。
-3. 回归评估：调用 `scripts/eval_auto.py` 对 SFT 与 RL 模型进行对比测试，生成 `eval_report_round1.md`，并列出显著提升与退化样本。
-4. 人工审查：医学顾问使用抽检脚本校阅高风险输出，必要时对奖励权重或采样策略做微调。
+1. 实现 `scripts/train_ppo.py`，集成策略/参考模型、奖励函数、日志、checkpoint 与 CLI 超参。
+2. 执行首轮 2k 提示 × 3 epoch 的 PPO，生成 `models/rl/round1`、`rewards.csv`、`kl_metrics.json`、`teacher_usage.csv`。
+3. 运行 `scripts/eval_auto.py` 对 SFT 与 RL 模型做对比，输出 `reports/rl_stage/eval_report_round1.md`，标记明显退化样本。
+4. 医学顾问基于抽检报告审阅 ≥50 条高风险样本，给出奖励权重、提示或数据策略的调整建议，并同步到配置。
 
 ### 阶段 C：交付与推广（第 3 周）
-1. 第二轮 PPO 迭代：纳入人工反馈后再训一轮，验证奖励调整效果，确保指标稳定提升。
-2. 产品化集成：更新 Demo 与批量推理脚本，加入 RL 模型选项及释义提示，确保用户知晓模型版本与适用边界。
-3. 文档与交付：完成《RL 评估报告》《rl_pipeline.md》《reward_rules.md》三份文档，并打包 `v1.0-rl` 适配器与日志。
-4. 复盘与规划：整理未解决风险、待补充数据点以及下一阶段自动化方向，进入常态化迭代节奏。
+1. 根据反馈进行第二轮 PPO，验证指标提升的稳定性并固化奖励配置。
+2. 更新 `scripts/batch_predict.py` 与 `scripts/demo_gradio.py`，加入 RL 模型选项与安全提示，同时在 README/docs 中补充 DeepSeek 教师 + RL 的使用说明。
+3. 打包 `models/rl/v1.0-rl`（LoRA+value head）、`reward_rules.md`、`teacher_judgements.jsonl`、`rl_pipeline.md`、《RL 评估报告》，并记录 DeepSeek 教师版本与提示模板。
+4. 复盘未覆盖风险点、后续数据扩展计划及 DeepSeek 调用成本，为常态化 RL 迭代制定节奏。
 
 ## 5. 风险与缓解
-- **奖励错配导致投机取巧**：每轮训练后审查高奖励样本，必要时追加负向规则（如过度冗长、重复用词扣分），并保留人工抽检闭环。
-- **安全性回退**：遵循参考模型 KL 约束，利用红队基准集做 A/B 比较，一旦危险输出增多立即回滚到 SFT 版本。
-- **资源受限**：若 GPU 资源不足，优先缩短序列长度、降低 batch 并增加训练轮数；也可临时租用云 GPU，按需扩容。
-- **合规隐患**：所有新增数据继续遵循脱敏流程，奖励说明与人工审查记录归档备查，确保医疗合规与审计透明。
+- **奖励错配**：定期审查高奖励样本，必要时在奖励函数加入冗长/重复惩罚或调整 DeepSeek 提示，防止模型“刷分”。
+- **安全回退**：依靠 reference+KL 控制，并使用红队集做 A/B，对风险升高的版本立即回滚至 SFT。
+- **资源或 API 波动**：DeepSeek 调用通过缓存、优先队列和速率限制控制成本；若 GPU 紧张，则缩短序列或降低 batch，延长训练轮次。
+- **教师模型漂移**：记录 DeepSeek 版本与请求日志，若服务异常则降级为规则奖励 + 人工抽检，并在恢复后重新校准奖励分布。
+- **合规**：所有新增数据保持脱敏，DeepSeek 调用与人工审查日志归档，确保医疗合规审计可追溯。
 
-## 6. 里程碑与交付物
-1. **第 1 周**：完成奖励体系、抽检脚本与 RL 训练数据集，交付《奖励规则说明》、`training_prompts.jsonl`。
-2. **第 2 周**：实现并运行首轮 `train_ppo.py`，提交 `eval_report_round1.md`、`rewards.csv`、初版 RL 模型权重。
-3. **第 3 周**：完成第二轮迭代与产品化集成，交付《RL 评估报告》《rl_pipeline.md》以及 `v1.0-rl` 模型包。
-
-遵循上述计划，规则增强的 RLAIF-PPO 方案可在三周内完成从奖励构建到交付上线的闭环，同时保持低人工投入与可控训练成本，为后续安全能力迭代打下基线。
+## 6. 里程碑与交付
+1. **第 1 周**：交付 `training_prompts.jsonl`、`reward_rules.md`、`teacher_judgements.jsonl`、抽检报告模板。
+2. **第 2 周**：完成首轮 RL 训练与评估，产出 `models/rl/round1`、`rewards.csv`、`teacher_usage.csv`、`eval_report_round1.md`。
+3. **第 3 周**：完成第二轮训练与产品化集成，交付 `models/rl/v1.0-rl`、`rl_pipeline.md`、《RL 评估报告》，并归档 DeepSeek 教师版本/提示配置。
