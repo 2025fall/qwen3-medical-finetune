@@ -1,0 +1,30 @@
+# Qwen3 微调项目依赖包
+
+# 深度学习框架
+torch>=2.0.0
+transformers>=4.35.0
+
+# 模型微调相关
+peft>=0.6.0
+accelerate>=0.24.0
+
+# 数据处理
+datasets>=2.14.0
+pandas>=1.5.0
+
+# 模型下载和管理
+modelscope>=1.9.0
+
+# Web界面
+gradio>=4.0.0
+
+# 其他工具
+numpy>=1.24.0
+regex>=2023.8.8
+tqdm>=4.65.0
+
+# 可选：用于更好的性能
+# bitsandbytes>=0.41.0  # 4bit/8bit量化（可选）
+# flash-attn>=2.3.0     # Flash Attention（可选，需要特定GPU）
+# deepspeed>=0.12.0     # DeepSpeed分布式训练（可选）
+

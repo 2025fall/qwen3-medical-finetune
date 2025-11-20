@@ -1,30 +1,42 @@
-# Qwen3 微调项目依赖包
+# Qwen3 医疗微调项目依赖包
+# 最后更新: 2024-11-20
 
-# 深度学习框架
+# ==================== 核心深度学习框架 ====================
 torch>=2.0.0
 transformers>=4.35.0
 
-# 模型微调相关
-peft>=0.6.0
-accelerate>=0.24.0
+# ==================== 模型微调相关 ====================
+peft>=0.6.0              # LoRA等参数高效微调
+accelerate>=0.24.0       # 分布式训练加速
 
-# 数据处理
-datasets>=2.14.0
+# ==================== 数据处理 ====================
+datasets==2.16.1         # ⚠️ 固定版本以兼容modelscope 1.32.0
 pandas>=1.5.0
-
-# 模型下载和管理
-modelscope>=1.9.0
-
-# Web界面
-gradio>=4.0.0
-
-# 其他工具
 numpy>=1.24.0
+
+# ==================== 模型下载和管理 ====================
+modelscope>=1.9.0        # ModelScope平台SDK
+
+# ==================== Web界面 ====================
+gradio>=4.0.0            # 交互式演示界面
+
+# ==================== 通用工具 ====================
 regex>=2023.8.8
 tqdm>=4.65.0
 
-# 可选：用于更好的性能
-# bitsandbytes>=0.41.0  # 4bit/8bit量化（可选）
-# flash-attn>=2.3.0     # Flash Attention（可选，需要特定GPU）
-# deepspeed>=0.12.0     # DeepSpeed分布式训练（可选）
+# ==================== RL强化学习阶段依赖 ====================
+trl>=0.7.10              # Transformer Reinforcement Learning (PPO)
+rich>=13.0.0             # 终端美化输出
+openai>=1.0.0            # DeepSeek API客户端
+protobuf                 # 协议缓冲区（某些模型需要）
+sentencepiece            # Tokenizer支持
 
+# ==================== 可选：性能优化 ====================
+# bitsandbytes>=0.41.0   # 4bit/8bit量化（可选，需CUDA）
+# flash-attn>=2.3.0      # Flash Attention（可选，需特定GPU）
+# deepspeed>=0.12.0      # DeepSpeed分布式训练（可选）
+
+# ==================== 版本兼容性说明 ====================
+# - datasets: 固定到2.16.1，因为2.17+移除了LargeList，与modelscope不兼容
+# - fsspec: 应≤2023.10.0（datasets 2.16.1依赖）
+# - huggingface-hub: 应<1.0（transformers 4.57依赖）

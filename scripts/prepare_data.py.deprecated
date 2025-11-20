@@ -4,7 +4,12 @@ import os, json, random, re, hashlib
 # 导入defaultdict，它是一个带有默认值的字典
 from collections import defaultdict
 # 从modelscope库导入MsDataset，用于加载数据集
-from modelscope.msdatasets import MsDataset
+try:
+    from modelscope.msdatasets import MsDataset
+    USE_MODELSCOPE = True
+except ImportError:
+    print("⚠️ ModelScope not available, will use alternative data loading")
+    USE_MODELSCOPE = False
 
 # 设置随机种子为42，以确保每次运行时随机结果都一样，便于复现
 random.seed(42)
@@ -48,18 +53,46 @@ def semantic_key(text: str) -> str:
 
 # 定义一个函数，用于加载原始数据
 def load_raw():
-    # 从ModelScope平台加载指定的数据集
-    ds = MsDataset.load('krisfu/delicate_medical_r1_data', subset_name='default', split='train')
-    # 将数据集中的每个样本转换为字典格式并存入列表
-    data = [dict(x) for x in ds]
-    # 保存一份原始数据到本地文件，方便后续使用
-    with open(os.path.join(RAW_DIR, "delicate_medical_r1_data.jsonl"), "w", encoding="utf-8") as f:
-        # 遍历数据列表
-        for x in data:
-            # 将每个样本字典转换为JSON字符串并写入文件，ensure_ascii=False确保中文字符正常显示
-            f.write(json.dumps(x, ensure_ascii=False) + "\n")
-    # 返回加载的数据
-    return data
+    raw_file = os.path.join(RAW_DIR, "delicate_medical_r1_data.jsonl")
+    
+    # 如果本地已有原始数据，直接加载
+    if os.path.exists(raw_file):
+        print(f"📂 Loading from local cache: {raw_file}")
+        data = []
+        with open(raw_file, "r", encoding="utf-8") as f:
+            for line in f:
+                data.append(json.loads(line))
+        return data
+    
+    # 否则尝试从ModelScope下载
+    if USE_MODELSCOPE:
+        try:
+            print("📥 Downloading from ModelScope...")
+            # 从ModelScope平台加载指定的数据集
+            ds = MsDataset.load('krisfu/delicate_medical_r1_data', subset_name='default', split='train')
+            # 将数据集中的每个样本转换为字典格式并存入列表
+            data = [dict(x) for x in ds]
+            # 保存一份原始数据到本地文件，方便后续使用
+            with open(raw_file, "w", encoding="utf-8") as f:
+                # 遍历数据列表
+                for x in data:
+                    # 将每个样本字典转换为JSON字符串并写入文件，ensure_ascii=False确保中文字符正常显示
+                    f.write(json.dumps(x, ensure_ascii=False) + "\n")
+            # 返回加载的数据
+            return data
+        except Exception as e:
+            print(f"❌ Failed to load from ModelScope: {e}")
+            print("💡 Please manually download the dataset and place it at:", raw_file)
+            print("   Dataset URL: https://www.modelscope.cn/datasets/krisfu/delicate_medical_r1_data")
+            raise
+    else:
+        print(f"❌ No data source available. Please manually download the dataset.")
+        print(f"   Place the dataset at: {raw_file}")
+        print("   Dataset URL: https://www.modelscope.cn/datasets/krisfu/delicate_medical_r1_data")
+        print("\n   Or create a sample dataset for testing:")
+        print("   Use the following structure:")
+        print('   {"question": "...", "think": "...", "answer": "..."}')
+        raise FileNotFoundError(f"Dataset not found at {raw_file}")
 
 # 定义一个函数，将原始样本转换为指定的格式（schema）
 def to_schema(sample):

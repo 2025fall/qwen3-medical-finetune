@@ -6,14 +6,18 @@ from peft import PeftModel
 DATA = "data/processed/test.jsonl"
 OUT  = "data/processed/test_pred.jsonl"
 
-# 选择其一：
-# 1) 全参：
-MODEL_DIR = "models/full/final_model"
-IS_LORA = False
-# 2) LoRA：
-# BASE_DIR = "models/Qwen/Qwen3-1.7B"
-# ADAPTER_DIR = "models/lora/final_lora"
-# IS_LORA = True
+# ================= 模型配置 =================
+# 模式选择: "full" (全参), "sft" (LoRA SFT), "rl" (PPO LoRA)
+MODE = "sft" 
+
+BASE_DIR = "models/Qwen/Qwen3-1.7B"
+
+MODELS = {
+    "full": {"path": "models/full/final_model", "is_lora": False},
+    "sft":  {"path": "models/lora/final_lora", "is_lora": True},
+    "rl":   {"path": "models/rl/checkpoints/final_rl_model", "is_lora": True}
+}
+# ===========================================
 
 PROMPT = "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。"
 
@@ -27,16 +31,23 @@ def apply_template(tokenizer, question):
     )
 
 def main():
-    if IS_LORA:
+    print(f"🚀 Running inference in [{MODE.upper()}] mode...")
+    cfg = MODELS[MODE]
+    
+    if cfg["is_lora"]:
+        print(f"   Base: {BASE_DIR}")
+        print(f"   Adapter: {cfg['path']}")
         base = AutoModelForCausalLM.from_pretrained(BASE_DIR, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
-        model = PeftModel.from_pretrained(base, ADAPTER_DIR).eval()
+        model = PeftModel.from_pretrained(base, cfg["path"]).eval()
         tokenizer = AutoTokenizer.from_pretrained(BASE_DIR, use_fast=False, trust_remote_code=True)
     else:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True).eval()
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, use_fast=False, trust_remote_code=True)
+        print(f"   Model: {cfg['path']}")
+        model = AutoModelForCausalLM.from_pretrained(cfg["path"], torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True).eval()
+        tokenizer = AutoTokenizer.from_pretrained(cfg["path"], use_fast=False, trust_remote_code=True)
 
-    outs = []
-    with open(DATA,"r",encoding="utf-8") as f:
+    if not os.path.exists(DATA):
+        print(f"❌ Data file {DATA} not found.")
+        return
         for line in f:
             r = json.loads(line)
             text = apply_template(tokenizer, r["input"])
