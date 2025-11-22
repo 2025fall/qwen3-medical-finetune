@@ -2,18 +2,18 @@
 
 # 深度学习框架
 torch>=2.0.0
-transformers>=4.35.0
+transformers>=4.50.0
 
 # 模型微调相关
 peft>=0.6.0
-accelerate>=0.24.0
+accelerate
 
 # 数据处理
-datasets>=2.14.0
-pandas>=1.5.0
+datasets==3.2.0
+pandas
 
 # 模型下载和管理
-modelscope>=1.9.0
+modelscope==1.22.0
 
 # Web界面
 gradio>=4.0.0
@@ -22,6 +22,8 @@ gradio>=4.0.0
 numpy>=1.24.0
 regex>=2023.8.8
 tqdm>=4.65.0
+addict
+swanlab
 
 # 可选：用于更好的性能
 # bitsandbytes>=0.41.0  # 4bit/8bit量化（可选）
