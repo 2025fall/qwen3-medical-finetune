@@ -83,7 +83,7 @@ def predict(messages, model, tokenizer):
 # 1) 下载模型（命中本地缓存则不会重复下载）
 model_dir = snapshot_download("Qwen/Qwen3-1.7B", cache_dir="/root/autodl-tmp/", revision="master")
 
-# 2) 加载 tokenizer 和模型
+# 2) 加载 tokenizer 和基础模型
 tokenizer = AutoTokenizer.from_pretrained("/root/autodl-tmp/Qwen/Qwen3-1.7B", use_fast=False, trust_remote_code=True)
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -143,7 +143,7 @@ args = TrainingArguments(
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,
     gradient_accumulation_steps=4,
-    evaluation_strategy="steps",
+    evaluation_strategy="steps",  # transformers 4.35+ 的参数名
     eval_steps=100,
     logging_steps=10,
     num_train_epochs=2,
