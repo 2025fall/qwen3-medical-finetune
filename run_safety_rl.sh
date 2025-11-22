@@ -42,11 +42,11 @@ if [ -f "data/processed/train.jsonl" ] && [ $(cat data/processed/train.jsonl | w
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "跳过数据准备"
     else
-        python3 scripts/prepare_data_multi_source.py medical-o1
+        python3 scripts/prepare_data.py
     fi
 else
-    echo "准备数据（使用medical-o1数据集）..."
-    python3 scripts/prepare_data_multi_source.py medical-o1
+    echo "准备数据..."
+    python3 scripts/prepare_data.py
 fi
 
 # Step 3: 准备RL训练数据

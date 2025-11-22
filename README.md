@@ -73,20 +73,13 @@ pip install -r requirements.txt
 # 激活虚拟环境
 source .venv/bin/activate
 
-# 方式1: 使用medical-o1数据集（推荐用于RL，包含推理链）
-python scripts/prepare_data_multi_source.py medical-o1
-
-# 方式2: 使用原始数据集
+# 运行单源数据准备（基于 FreedomIntelligence/medical-o1-reasoning-SFT）
 python scripts/prepare_data.py
-
-# 方式3: 混合多个数据源
-python scripts/prepare_data_multi_source.py medical-o1,datatang-qa
 ```
 
 **推荐数据集**：
 - **FreedomIntelligence/medical-o1-reasoning-SFT** (最适合RL) - 包含完整推理链
 - **krisfu/delicate_medical_r1_data** (原始) - 已适配代码
-- **DatatangBeijing/203029Groups-ChineseMedicalQuestionAnsweringData** (大规模)
 
 详见：[数据集选择指南](docs/dataset_selection_guide.md)
 
