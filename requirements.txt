@@ -2,18 +2,21 @@
 
 # 深度学习框架
 torch>=2.0.0
-transformers>=4.50.0
+# PPO/RL 依赖需要 transformers <5
+transformers==4.44.2
 
 # 模型微调相关
-peft>=0.6.0
-accelerate
+peft==0.17.1
+accelerate==1.12.0
 
 # 数据处理
+pandas
 datasets==3.2.0
 pandas
 
 # 模型下载和管理
 modelscope==1.22.0
+diffusers==0.27.2
 
 # Web界面
 gradio>=4.0.0
@@ -36,4 +39,5 @@ rich>=13.0.0
 openai>=1.0.0,<1.50.0
 protobuf>=3.20,<5
 sentencepiece>=0.1.99
+tokenizers==0.19.1
 

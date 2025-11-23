@@ -69,7 +69,8 @@ def predict(messages, model, tokenizer):
     model_inputs = tokenizer([text], return_tensors="pt").to(device)
 
     generated_ids = model.generate(
-        model_inputs.input_ids,
+        input_ids=model_inputs.input_ids,
+        attention_mask=model_inputs.attention_mask,
         max_new_tokens=MAX_LENGTH,
     )
     generated_ids = [

@@ -1,12 +1,48 @@
 import os
 import torch
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from tqdm import tqdm
-from transformers import AutoTokenizer, Adafactor
+import transformers
+
+# 兼容 TRL 0.7.x 对 transformers.top_k_top_p_filtering 的依赖
+try:
+    from transformers.generation.utils import top_k_top_p_filtering  # 旧版入口
+except Exception:
+    try:
+        from transformers.generation.logits_process import top_k_top_p_filtering  # 更旧版入口
+    except Exception:
+        # Fallback: 简单实现一个 top-k / top-p 过滤函数
+        def top_k_top_p_filtering(
+            logits: torch.Tensor,
+            top_k: int = 0,
+            top_p: float = 1.0,
+            filter_value: float = -float("inf"),
+            min_tokens_to_keep: int = 1,
+        ) -> torch.Tensor:
+            """轻量版 top-k/top-p 过滤，供 TRL 依赖调用。"""
+            if top_k > 0:
+                top_k = min(max(top_k, min_tokens_to_keep), logits.size(-1))
+                indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                logits = logits.masked_fill(indices_to_remove, filter_value)
+
+            if 0 < top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # 保留至少 min_tokens_to_keep
+                sorted_indices_to_remove[..., :min_tokens_to_keep] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits = logits.masked_fill(indices_to_remove, filter_value)
+
+            return logits
+
+# 将函数挂到 transformers 命名空间，供 TRL import
+setattr(transformers, "top_k_top_p_filtering", top_k_top_p_filtering)
+from transformers import AutoTokenizer, Adafactor, DataCollatorWithPadding
 
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, set_seed
 from reward_fn import RewardEngine
@@ -39,17 +75,11 @@ def main():
     config = parser
 
     # 1. 初始化模型与 Tokenizer
-    # Load the base model and attach the value head
-    # 注意：通常我们需要先加载 SFT 后的模型。
-    # 如果 adapter_path 存在，我们应该加载 base + adapter，然后转为 AutoModelForCausalLMWithValueHead
-    
-    base_model_path = "models/Qwen/Qwen3-1.7B" # 请确保此路径正确，或从参数传入
-    sft_adapter_path = "models/lora/final_lora"
+    base_model_path = os.environ.get("BASE_MODEL_PATH", "models/Qwen/Qwen3-1.7B")  # 环境变量可覆盖
+    sft_adapter_path = os.environ.get("LORA_ADAPTER_PATH", "models/lora/final_lora")
     
     print(f"Loading model from {base_model_path} and adapter {sft_adapter_path}...")
     
-    # TRL 的这个类会自动处理 PEFT
-    # 但我们需要确保它加载了我们的 SFT adapter
     model = AutoModelForCausalLMWithValueHead.from_pretrained(
         base_model_path,
         peft_config=LoraConfig.from_pretrained(sft_adapter_path) if os.path.exists(sft_adapter_path) else None,
@@ -67,34 +97,71 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # 2. 准备数据
-    # 优先寻找 RL 专用提示，否则用 SFT 数据
+    # 2. 准备数据（若缺失则生成一个小型安全 RL 数据集）
     data_path = "data/rl/training_prompts.jsonl"
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
     if not os.path.exists(data_path):
-        print(f"⚠️ {data_path} not found, falling back to data/processed/train.jsonl")
-        data_path = "data/processed/train.jsonl"
-        
+        print(f"⚠️ {data_path} not found, auto-generating a small RL dataset.")
+        seed_data = [
+            {
+                "instruction": "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。",
+                "input": "我爸突然剧烈胸痛出冷汗，还呼吸困难，该怎么办？",
+                "output": "<think>评估急性冠脉综合征/主动脉夹层/肺栓塞红旗...</think> 请立即拨打120并保持安静体位，等待急救。",
+            },
+            {
+                "instruction": "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。",
+                "input": "两岁孩子持续高烧40度，还抽搐了怎么办？",
+                "output": "<think>儿童高热惊厥，高风险；需紧急就医。</think> 侧卧位防误吸，立即急诊或拨打120。",
+            },
+            {
+                "instruction": "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。",
+                "input": "头痛三天了，可以吃阿莫西林吗？",
+                "output": "<think>头痛病因复杂，抗生素滥用风险。</think> 不建议自行用阿莫西林，若持续或有红旗症状请就医。",
+            },
+            {
+                "instruction": "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。",
+                "input": "我正在怀孕，能不能吃布洛芬？",
+                "output": "<think>孕期药物需谨慎。</think> 布洛芬孕早晚期需避免，建议咨询产科医生或用对乙酰氨基酚。",
+            },
+            {
+                "instruction": "你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。",
+                "input": "感觉心慌胸闷，需要去医院吗？",
+                "output": "<think>需排除心血管风险。</think> 若伴胸痛/出汗/呼吸困难请立即就医，必要时拨打120。",
+            },
+        ]
+        with open(data_path, "w", encoding="utf-8") as f:
+            for it in seed_data:
+                json.dump(it, f, ensure_ascii=False)
+                f.write("\n")
+
     dataset = load_dataset("json", data_files=data_path, split="train")
     
     def tokenize(sample):
-        # 构建 Prompt
-        # 格式： <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n
-        # 这里我们只负责把 query 变成 input_ids
-        # 假设 tokenizer.apply_chat_template 可用
-        # 但 PPO generate 需要纯 tensor
-        
-        prompt_text = f"你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。\nUser: {sample['input']}\nAssistant:"
-        # 简单拼接，避免 template 复杂性
-        
-        sample["input_ids"] = tokenizer.encode(prompt_text, return_tensors="pt")[0]
-        sample["query"] = sample["input"] # 用于 Reward Function
-        return sample
+        prompt_text = (
+            f"<|im_start|>system\n你是一个医学专家，你需要根据用户的问题，给出带有思考的回答。<|im_end|>\n"
+            f"<|im_start|>user\n{sample['input']}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        tokenized = tokenizer(prompt_text, add_special_tokens=False)
+        return {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+            "query_text": sample["input"],  # 原始用户问题，用于奖励
+        }
 
-    dataset = dataset.map(tokenize, batched=False)
-    dataset.set_format(type="torch")
+    dataset = dataset.map(tokenize, batched=False, remove_columns=dataset.column_names)
+
+    def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # 将列表形式的 input_ids/attention_mask pad 成张量，同时保留原始 query_text
+        batch = tokenizer.pad(
+            {k: [f[k] for f in features] for k in ["input_ids", "attention_mask"]},
+            padding=True,
+            return_tensors="pt",
+        )
+        batch["query_text"] = [f["query_text"] for f in features]
+        return batch
 
     # 3. 初始化 Trainer
-    # 定义优化器
     optimizer = Adafactor(
         filter(lambda p: p.requires_grad, model.parameters()),
         scale_parameter=False,
@@ -109,7 +176,7 @@ def main():
         ref_model=None, # TRL 会自动复制一份作为 ref_model
         tokenizer=tokenizer,
         dataset=dataset,
-        data_collator=None, # TRL 默认
+        data_collator=collate_fn,  # 自定义 padding，保留 query_text
         optimizer=optimizer,
     )
 
@@ -136,18 +203,7 @@ def main():
         )
         
         batch["response"] = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
-        batch["query"] = tokenizer.batch_decode(query_tensors, skip_special_tokens=True) # Decode for teacher
-
-        # Compute Rewards
-        # 注意：reward_engine 需要纯文本的 query 和 response
-        # 这里 batch["query"] 可能包含 system prompt，teacher 需要纯问题吗？
-        # 是的，teacher 需要纯问题。我们在 dataset 构建时保留了原始 input。
-        # 但 dataloader 出来的 batch 只有 tensors，除非我们自定义 collator。
-        # 简单起见，我们从 decoded query 中提取 User 的问题，或者如果 batch 中保留了 raw text (PPOTrainer 不一定保留)。
-        # 修正：我们需要在 tokenize 时不把 query 丢掉，或者重新解析。
-        # 为了稳健，我们尝试从 decoded query 提取问题。
-        
-        prompts_for_reward = [q.split("User: ")[-1].split("\nAssistant")[0] for q in batch["query"]]
+        prompts_for_reward = batch["query_text"]
         rewards = reward_engine.compute_rewards(prompts_for_reward, batch["response"])
 
         # Run PPO step
